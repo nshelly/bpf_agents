@@ -2,7 +2,7 @@
 #
 # @lint-avoid-python-3-compatibility-imports
 #
-# tcpconnect    Trace Syscalls connect()s.
+# sys_network    Trace all networking syscalls
 #               For Linux, uses BCC, eBPF. Embedded C.
 #
 # USAGE: tcpconnect [-h] [-t] [-p PID] [-P PORT [PORT ...]]
@@ -29,11 +29,11 @@ import ctypes as ct
 socketfd_to_tuple = {}
 
 examples = """examples:
-    ./sys_send           # trace all TCP connect()s
-    ./sys_send -t        # include timestamps
-    ./sys_send -p 181    # only trace PID 181
-    ./sys_send -P 80     # only trace port 80
-    ./sys_send.py -d -t --nocomm sudo,sshd -o wget_`date +%m-%d-%H:%M.%S`.out
+    ./sys_stream           # trace all TCP connect()s
+    ./sys_stream -t        # include timestamps
+    ./sys_stream -p 181    # only trace PID 181
+    ./sys_stream -P 80     # only trace port 80
+    ./sys_stream.py -d -t --nocomm sudo,sshd -o wget_`date +%m-%d-%H:%M.%S`.out
 """
 parser = argparse.ArgumentParser(
     description="Trace TCP connects",
@@ -60,7 +60,7 @@ parser.add_argument("-P", "--port",
                     help="comma-separated list of destination ports to trace.")
 args = parser.parse_args()
 
-with open("sys_send.cc", "r") as f:
+with open("sys_stream.cc", "r") as f:
     bpf_text = f.read()
     bpf_text = re.sub(r'bpf_\((ntohl|ntohs)\)',
                       '\1', bpf_text)
