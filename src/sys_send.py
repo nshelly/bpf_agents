@@ -2,21 +2,14 @@
 #
 # @lint-avoid-python-3-compatibility-imports
 #
-# tcpconnect    Trace TCP connect()s.
+# tcpconnect    Trace Syscalls connect()s.
 #               For Linux, uses BCC, eBPF. Embedded C.
 #
 # USAGE: tcpconnect [-h] [-t] [-p PID] [-P PORT [PORT ...]]
 #
-# All connection attempts are traced, even if they ultimately fail.
+# All network-related syscalls are traced.
 #
-# This uses dynamic tracing of kernel functions, and will need to be updated
-# to match kernel changes.
 #
-# Copyright (c) 2015 Brendan Gregg.
-# Licensed under the Apache License, Version 2.0 (the "License")
-#
-# 25-Sep-2015   Brendan Gregg   Created this.
-# 14-Feb-2016      "      "     Switch to bpf_perf_output.
 from __future__ import print_function
 
 import re
@@ -36,18 +29,16 @@ import ctypes as ct
 socketfd_to_tuple = {}
 
 examples = """examples:
-    ./tcpconnect           # trace all TCP connect()s
-    ./tcpconnect -t        # include timestamps
-    ./tcpconnect -p 181    # only trace PID 181
-    ./tcpconnect -P 80     # only trace port 80
+    ./sys_send           # trace all TCP connect()s
+    ./sys_send -t        # include timestamps
+    ./sys_send -p 181    # only trace PID 181
+    ./sys_send -P 80     # only trace port 80
+    ./sys_send.py -d -t --nocomm sudo,sshd -o wget_`date +%m-%d-%H:%M.%S`.out
 """
 parser = argparse.ArgumentParser(
     description="Trace TCP connects",
     formatter_class=argparse.RawDescriptionHelpFormatter,
     epilog=examples)
-parser.add_argument("--local_only",
-                    action="store_true", default=False,
-                    help="don't send to server")
 parser.add_argument("-d", "--debug", action="store_true",
                     help="Debug mode")
 parser.add_argument("-o", "--output",
@@ -149,28 +140,6 @@ class Data_send(ct.Structure):
         ("task", ct.c_char * TASK_COMM_LEN)
     ]
 
-# class Data_sendmsg(ct.Structure):
-#     _fields_ = [
-#         ("ts_us", ct.c_ulonglong),
-#         ("pid", ct.c_ulonglong),
-#         ("sockfd", ct.c_ulonglong),
-#         ("flags", ct.c_ulonglong),
-#         ("task", ct.c_char * TASK_COMM_LEN)
-#     ]
-
-# class Data_sendto(ct.Structure):
-#     _fields_ = [
-#         ("ts_us", ct.c_ulonglong),
-#         ("pid", ct.c_ulonglong),
-#         ("sockfd", ct.c_ulonglong),
-#         ("len", ct.c_ulonglong),
-#         ("flags", ct.c_ulonglong),
-#         ("daddr", ct.c_ulonglong),
-#         ("dport", ct.c_ulong),
-#         ("task", ct.c_char * TASK_COMM_LEN)
-#     ]
-
-
 # PRODUCER = BpfProducer(
 #     bootstrap_servers=[args.kafka_server], local_only=args.local_only)
 
@@ -223,39 +192,6 @@ def print_event(func_name, data, is_return=False):
           end="\n",
           file=output)
 
-
-def print_sendto_event(cpu, data, size):
-    print_event("sendto", data)
-    # event = ct.cast(data, ct.POINTER(Data_sendto)).contents
-    # global start_ts
-    # if args.timestamp:
-    #     if start_ts == 0:
-    #         start_ts = event.ts_us
-    #     print("%-9.3f" % ((float(event.ts_us) - start_ts) / 1000000), end="")
-    #
-    # # import  epdb; epdb.set_trace()
-    # # PRODUCER.send("tcpconnect-ipv4", event, 4)
-    # # print("sendto %-6d %-12.12s %-16s %-6d %-6d %-6d %-6d %-6d %04X" % \
-    # #       (event.pid, event.task.decode(),
-    # #        inet_ntop(AF_INET, pack("I", event.daddr)),
-    # #        event.sin_family,
-    # #        event.sin_port,
-    # #        event.addr_len,
-    # #        e  vent.sockfd, event.len, event.flags))
-    # print("{name:10} {pid:6} {task:12.12} {ip_addr:16} {family:4} "\
-    #       "{port:6} {addr_len:6} {sockfd:6} {buf_len:6}"\
-    #       "{flags:04X}".format(
-    #       name="sendto",
-    #       pid=event.pid,
-    #       task=event.task or event.task.decode(),
-    #       ip_addr=inet_ntop(AF_INET, pack("I", event.daddr)),
-    #       family=event.sin_family,
-    #       port=event.sin_port,
-    #       addr_len=event.addr_len,
-    #       sockfd=event.sockfd,
-    #       buf_len=event.len,
-    #       flags=event.flags))
-    #
 
 # initialize BPF
 b = BPF(text=bpf_text)

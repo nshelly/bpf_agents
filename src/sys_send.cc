@@ -4,7 +4,6 @@
 #include <netinet/in.h>
 
 #define PT_REGS_RC(ctx)		0
-
 // End - BPF syntax
 
 #include <uapi/linux/ptrace.h>
@@ -15,6 +14,7 @@ struct pid_fd {
     u64 fd;
 };
 
+// Maintains a set of AF_INET file descriptors (sockets)
 BPF_HASH(socket_pids);
 BPF_HASH(currsock, u64, struct sock *);
 BPF_HASH(pid_to_curr_fd);
@@ -207,20 +207,8 @@ int trace_connect_v4_return(struct pt_regs *ctx) {
         &skp->__sk_common.skc_daddr);
     send_data.sport = bpf_ntohs(sport);
     send_data.dport = bpf_ntohs(dport);
-//        ipv4_events.perf_submit(ctx, &data4, sizeof(data4));
     bpf_trace_printk("connect_return: -> %x:%d\n",
                      ntohl(send_data.daddr), ntohs(dport));
-
-//    } else /* 6 */ {
-//        struct ipv6_data_t data6 = {.pid = pid, .ipver = ipver};
-//        data6.ts_us = bpf_ktime_get_ns() / 1000;
-//        bpf_probe_read(&data6.saddr, sizeof(data6.saddr),
-//            &skp->__sk_common.skc_v6_rcv_saddr.in6_u.u6_addr32);
-//        bpf_probe_read(&data6.daddr, sizeof(data6.daddr),
-//            &skp->__sk_common.skc_v6_daddr.in6_u.u6_addr32);
-//        data6.dport = ntohs(dport);
-//        bpf_get_current_comm(&data6.task, sizeof(data6.task));
-////        ipv6_events.perf_submit(ctx, &data6, sizeof(data6));data6
 
     tcp_v4_connect_return_events.perf_submit(ctx, &send_data, sizeof(send_data));
     currsock._delete(&pid_tgid);
@@ -230,9 +218,9 @@ int trace_connect_v4_return(struct pt_regs *ctx) {
 int trace_inet_csk_accept_return(struct pt_regs *ctx)
 {
     struct sock *newsk = (struct sock *)PT_REGS_RC(ctx);
-//    if (newsk == NULL) {
-//        return 0;
-//    }
+    if (newsk == NULL) {
+        return 0;
+    }
     struct send_data_t send_data = {};
     get_thread_metadata(&send_data);
     if (!apply_filter(&send_data)) {
@@ -279,30 +267,6 @@ int trace_send_entry(struct pt_regs *ctx, int sockfd,
 };
 
 
-
-//int trace_tcp_sendmsg(struct pt_regs *ctx, struct sock *sk,
-//                      struct msghdr *msg, size_t size)
-//{
-//    u32 pid = bpf_get_current_pid_tgid();
-//
-//    u16 dport = 0, family = sk->__sk_common.skc_family;
-//    u64 *val, zero = 0;
-//
-//    if (family == AF_INET) {
-//        struct ipv4_key_t ipv4_key = {.pid = pid};
-//        ipv4_key.saddr = sk->__sk_common.skc_rcv_saddr;
-//        ipv4_key.daddr = sk->__sk_common.skc_daddr;
-//        ipv4_key.lport = sk->__sk_common.skc_num;
-//        dport = sk->__sk_common.skc_dport;
-//        ipv4_key.dport = ntohs(dport);
-//        val = ipv4_send_bytes.lookup_or_init(&ipv4_key, &zero);
-//        (*val) += size;
-//
-//    }
-//
-//    return 0;
-//}
-
 int trace_sendmsg_entry(struct pt_regs *ctx,
                         int fd, const struct msghdr *msg,
                         int flags)
@@ -317,13 +281,6 @@ int trace_sendmsg_entry(struct pt_regs *ctx,
         return 0;
     };
 
-//    bpf_trace_printk("comm: %s\n", send_data.task);
-
-//    u64 sockfd = fd;
-//    u64 *found = network_fds.lookup(&sockfd);
-//    if (!found) {
-//        return 0;   // missed entry
-//    }
     struct sockaddr *msg_name = NULL;
     bpf_probe_read(&msg_name, sizeof(msg_name), &msg);
 
@@ -362,15 +319,6 @@ int trace_sendmmsg_entry(struct pt_regs *ctx, int fd)
         return 0;
     };
 
-//    struct sockaddr *msg_name = NULL;
-//    bpf_probe_read(&msg_name, sizeof(msg_name), &msg);
-//
-//    u16 sa_family;
-//    bpf_probe_read(&sa_family, sizeof(sa_family), &msg_name->sa_family);
-//
-//    if (sa_family != 0) {
-//        sendmmsg_events.perf_submit(ctx, &send_data, sizeof(send_data));
-//    }
     sendmmsg_events.perf_submit(ctx, &send_data, sizeof(send_data));
 
     return 0;
@@ -440,13 +388,6 @@ int trace_recvfrom_entry(struct pt_regs *ctx,
     return 0;
 }
 
-
-//
-//static
-//send_data_t get_bytes_returned(struct pt_regs *ctx) {
-//    /* Clean up here */
-//    return NULL;
-//}
 
 int trace_recvfrom_return(struct pt_regs *ctx) {
     u64 pid_tgid = bpf_get_current_pid_tgid();
@@ -740,56 +681,3 @@ int trace_bind_entry(struct pt_regs *ctx,
     bind_events.perf_submit(ctx, &send_data, sizeof(send_data));
     return 0;
 }
-
-
-//int trace_inet_csk_accept_return(struct pt_regs *ctx)
-//{
-//    struct sock *newsk = (struct sock *)PT_REGS_RC(ctx);
-//    u32 pid = bpf_get_current_pid_tgid();
-//
-//    if (newsk == NULL)
-//        return 0;
-//
-//    struct send_data_t send_data = {
-//            .pid = pid,
-//    };
-//
-//    // check this is TCP
-//    u8 protocol = 0;
-//    // workaround for reading the sk_protocol bitfield:
-//    bpf_probe_read(&protocol, 1, (void *)((long)&newsk->sk_wmem_queued) - 3);
-//    if (protocol != IPPROTO_TCP)
-//        return 0;
-//
-//    // pull in details
-//    u16 family = 0, lport = 0;
-//    bpf_probe_read(&family, sizeof(family), &newsk->__sk_common.skc_family);
-//    bpf_probe_read(&lport, sizeof(lport), &newsk->__sk_common.skc_num);
-//
-//    if (family == AF_INET) {
-//        struct ipv4_data_t data4 = {.pid = pid, .ip = 4};
-//        data4.ts_us = bpf_ktime_get_ns() / 1000;
-//        bpf_probe_read(&data4.saddr, sizeof(u32),
-//                       &newsk->__sk_common.skc_rcv_saddr);
-//        bpf_probe_read(&data4.daddr, sizeof(u32),
-//                       &newsk->__sk_common.skc_daddr);
-//        data4.lport = lport;
-//        bpf_get_current_comm(&data4.task, sizeof(data4.task));
-//        ipv4_events.perf_submit(ctx, &data4, sizeof(data4));
-//
-//    } else if (family == AF_INET6) {
-//        struct ipv6_data_t data6 = {.pid = pid, .ip = 6};
-//        data6.ts_us = bpf_ktime_get_ns() / 1000;
-//        bpf_probe_read(&data6.saddr, sizeof(data6.saddr),
-//                       &newsk->__sk_common.skc_v6_rcv_saddr.in6_u.u6_addr32);
-//        bpf_probe_read(&data6.daddr, sizeof(data6.daddr),
-//                       &newsk->__sk_common.skc_v6_daddr.in6_u.u6_addr32);
-//        data6.lport = lport;
-//        bpf_get_current_comm(&data6.task, sizeof(data6.task));
-//        ipv6_events.perf_submit(ctx, &data6, sizeof(data6));
-//    }
-//    // else drop
-//
-//    return 0;
-//}
-
