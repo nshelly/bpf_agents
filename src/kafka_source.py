@@ -21,7 +21,7 @@ class BpfProducer:
             "pid": event.pid,
             "ts_us": float(event.ts_us),
             "comm": event.task.decode(),
-            "ip": event.ip,
+            "ipver": event.ipver,
             "saddr": inet_ntop(AF_INET if ip_version == 4 else AF_INET6,
                                pack("I", event.saddr)),
             "daddr": inet_ntop(AF_INET if ip_version == 4 else AF_INET6,
@@ -38,9 +38,9 @@ class BpfProducer:
 
 
         # produce json messages
-        print("sending: ", json.dumps(data, indent=2))
         if not self.local_only:
             self.producer.send(topic, data)
+            print("sending: ", json.dumps(data, indent=2))
 
 
 

@@ -1,6 +1,5 @@
-#include <uapi/linux/ptrace.h>
 #include <net/sock.h>
-#include <bcc/proto.h>
+//#include <bcc/proto.h>
 
 BPF_HASH(currsock, u32, struct sock *);
 
@@ -9,9 +8,10 @@ struct ipv4_data_t {
     // XXX: switch some to u32's when supported
     u64 ts_us;
     u64 pid;
+    u64 sockfd;
     u64 saddr;
     u64 daddr;
-    u64 ip;
+    u64 ipver;
     u64 sport;
     u64 dport;
     char task[TASK_COMM_LEN];
@@ -23,14 +23,14 @@ struct ipv6_data_t {
     u64 pid;
     unsigned __int128 saddr;
     unsigned __int128 daddr;
-    u64 ip;
+    u64 ipver;
     u64 sport;
     u64 dport;
     char task[TASK_COMM_LEN];
 };
 BPF_PERF_OUTPUT(ipv6_events);
 
-int trace_connect_entry(struct pt_regs *ctx, struct sock *sk)
+int trace_connect_entry(struct pt_regs *ctx, int *sk)
 {
     u32 pid = bpf_get_current_pid_tgid();
 //    FILTER_PID
@@ -69,7 +69,7 @@ static int trace_connect_return(struct pt_regs *ctx, short ipver)
 //    FILTER_PORT
 
     if (ipver == 4) {
-        struct ipv4_data_t data4 = {.pid = pid, .ip = ipver};
+        struct ipv4_data_t data4 = {.pid = pid, .ipver = ipver};
         data4.ts_us = bpf_ktime_get_ns() / 1000;
         bpf_probe_read(&data4.saddr, sizeof(u32),
             &skp->__sk_common.skc_rcv_saddr);
@@ -81,7 +81,7 @@ static int trace_connect_return(struct pt_regs *ctx, short ipver)
         ipv4_events.perf_submit(ctx, &data4, sizeof(data4));
 
     } else /* 6 */ {
-        struct ipv6_data_t data6 = {.pid = pid, .ip = ipver};
+        struct ipv6_data_t data6 = {.pid = pid, .ipver = ipver};
         data6.ts_us = bpf_ktime_get_ns() / 1000;
         bpf_probe_read(&data6.saddr, sizeof(data6.saddr),
             &skp->__sk_common.skc_v6_rcv_saddr.in6_u.u6_addr32);

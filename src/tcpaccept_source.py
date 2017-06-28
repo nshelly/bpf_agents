@@ -23,7 +23,6 @@ from socket import inet_ntop, AF_INET, AF_INET6
 from struct import pack
 
 from bcc import BPF
-
 from kafka_source import BpfProducer
 
 examples = """examples:
