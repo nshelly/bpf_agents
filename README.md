@@ -1,10 +1,12 @@
 # SysStream - Network traffic + OS context
 
+*The missing top + netstat for Wireshark*
 
-SysStream captures all system calls involving network traffic (including localhost) and sends the data for diagnosing problems across time.  This uses Linux profiling through extended Berkeley Packet Filter (eBPF) to provide:
- 1) Real-time dependency map of which applications on specific hosts are communicating with other ones.
- 2) Send and receive timestamps for all bytes sent and received on the wire,
- 3) OS-level statistics including user and group ID’s, process trees, open files and sockets, information for each byte sent over the network.
+SysStream captures all system calls involving network traffic, along with accompanying operating system-level data such as socket file descriptors, source and destination addresses, user and process ID of sending and receiving application, and other CPU information.  This uses advances in Linux profiling through the extended Berkeley Packet Filter (eBPF), "bytecode virtual machine" for the kernel, providing:
+
+ * Real-time dependency map of which applications on specific hosts are communicating with other ones.
+ * Send and receive timestamps for all bytes sent and received on the wire,
+ * OS-level statistics including user and group ID’s, process trees, open files and sockets, information for each byte sent over the network.
 
 
 ![alt text](./data/wget.gif)
