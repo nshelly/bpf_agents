@@ -97,7 +97,7 @@ if not args.net:
 if args.comm:
     compare_strs = []
     for comm in args.comm.split(','):
-        print("filtering out comm: %s"  % comm)
+        print("filtering comm: %s"  % comm)
         compare_str = []
         for i, c in enumerate(comm):
             compare_str.append("task[{i}] == '{c}'".format(
@@ -132,8 +132,8 @@ def inet_ntoa(addr):
 
 bpf_text = bpf_text.replace("._delete", ".delete")
 
-if args.debug:
-    print(bpf_text)
+# if args.debug:
+#     print(bpf_text)
 
 # event data
 TASK_COMM_LEN = 16      # linux/sched.h

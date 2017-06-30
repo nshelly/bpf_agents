@@ -7,6 +7,8 @@ SysStream captures all system calls involving network traffic (including localho
  3) OS-level statistics including user and group ID’s, process trees, open files and sockets, information for each byte sent over the network.
 
 
+![alt text](./data/wget.gif)
+
 ## How to use
 
 This example traces a wget request to an Apache2 webserver.
