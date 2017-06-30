@@ -28,7 +28,7 @@ struct send_data_t {
     u64 tgid;
     u64 ppid;
     u64 sockfd;
-    u64 len;
+    int len;
     u64 flags;
     u64 saddr;
     u64 sport;
@@ -73,13 +73,55 @@ BPF_PERF_OUTPUT(shutdown_events);
 #define bpf_get_current_tgid() bpf_get_current_pid_tgid() >> 32
 
 
+static u64 get_parent_pid_tgid() {
+    struct task_struct *task;
+    struct task_struct *real_parent_task;
+    u64 ppid, tgid;
+
+    task = (struct task_struct *)bpf_get_current_task();
+    bpf_probe_read(&real_parent_task,
+                   sizeof(real_parent_task),
+                   &task->real_parent);
+
+    bpf_probe_read(&ppid,
+                   sizeof(ppid),
+                   &real_parent_task->pid);
+
+    bpf_probe_read(&tgid,
+                   sizeof(tgid),
+                   &real_parent_task->tgid);
+    return ((ppid << 32) | (tgid & 0xffffffff));
+}
+
+static void set_network_fd(u64 fd) {
+    struct pid_fd net_data;
+    net_data.fd = fd;
+    net_data.pid_tgid = bpf_get_current_pid_tgid();
+    u64 val = 1;
+    network_fds.insert(&net_data, &val);
+
+    struct pid_fd parent_data;
+    parent_data.fd = fd;
+    parent_data.pid_tgid = get_parent_pid_tgid();
+    network_fds.insert(&parent_data, &val);
+}
+
+// Returns True if the file descriptor, fd, corresponds to an opened AF_INET or AF_INET6
+// socket by the current process or parent process.
 static int is_network_fd(int fd) {
+// FILTER NET
     struct pid_fd network_data;
     network_data.pid_tgid = bpf_get_current_pid_tgid();
     network_data.fd = (u64) fd;
     u64 *found = network_fds.lookup(&network_data);
-// FILTER NET
-    return found != NULL;
+    if (found != NULL) {
+        return true;
+    }
+    struct pid_fd parent_data;
+    parent_data.pid_tgid = get_parent_pid_tgid();
+    parent_data.fd = (u64) fd;
+    found = network_fds.lookup(&parent_data);
+    return (found != NULL);
 }
 
 static void
@@ -88,14 +130,12 @@ get_thread_metadata(struct send_data_t *send_data) {
     send_data->pid = bpf_get_current_pid();
     send_data->tgid = bpf_get_current_tgid();
 
-
     struct task_struct *task;
     struct task_struct *real_parent_task;
     u64 ppid;
 
     task = (struct task_struct *)bpf_get_current_task();
 
-    /** XXX Something wrong is here? */
     bpf_probe_read(&real_parent_task,
                    sizeof(real_parent_task),
                    &task->real_parent);
@@ -104,18 +144,14 @@ get_thread_metadata(struct send_data_t *send_data) {
                    sizeof(send_data->parent_task),
                    &real_parent_task->comm);
 
-    bpf_probe_read(&ppid,
-                   sizeof(ppid),
-                   &real_parent_task->pid);
-
 //    bpf_trace_printk("real_parent_task: %s, real_parent_pid: %s\n",
 //                     real_parent_task, ppid);
-    send_data->ppid = ppid & 0xffffffff;
+    send_data->ppid = get_parent_pid_tgid() >> 32;
     send_data->ts_us = bpf_ktime_get_ns() / 1000,
     bpf_get_current_comm(&send_data->task, sizeof(send_data->task));
 }
 
-// Returns 0 if we should filter (updated by BCC-logic), otherwise 1
+// Returns 0 if we should filter (updated by BCC program), otherwise 1
 static int apply_filter(struct send_data_t *send_data) {
 //    FILTER PORT
 //    FILTER PID
@@ -467,7 +503,7 @@ int trace_recvfrom_return(struct pt_regs *ctx) {
         return 0;
     };
     send_data.sockfd = *fd;
-    send_data.len = (u64)PT_REGS_RC(ctx);
+    send_data.len = PT_REGS_RC(ctx);
     recvfrom_return_events.perf_submit(ctx, &send_data, sizeof(send_data));
 
     pid_to_curr_fd._delete(&pid_tgid);
@@ -553,20 +589,47 @@ int trace_write_entry(struct pt_regs *ctx,
 
 int trace_writev_entry(struct pt_regs *ctx,
                        int fd, const struct iovec *iov, int iovcnt) {
-    if (!is_network_fd(fd)) {
-        return 0;   // missed entry
-    }
-
     struct send_data_t send_data = {};
     get_thread_metadata(&send_data);
     if (!apply_filter(&send_data)) {
         return 0;
     };
+
+    struct task_struct *task;
+    struct task_struct *real_parent_task;
+    u64 ppid, tgid;
+
+    task = (struct task_struct *)bpf_get_current_task();
+
+    bpf_probe_read(&real_parent_task,
+                   sizeof(real_parent_task),
+                   &task->real_parent);
+
+    bpf_probe_read(&ppid,
+                   sizeof(ppid),
+                   &real_parent_task->pid);
+
+    bpf_probe_read(&tgid,
+                   sizeof(tgid),
+                   &real_parent_task->tgid);
+
+    u64 pid_tgid = bpf_get_current_pid_tgid();
+    bpf_trace_printk("writev network_data pid_tgid: %lu, parent_data.pid_tgid: %lu,"
+                     "parent tgid: %d\n",
+                     pid_tgid, get_parent_pid_tgid(), tgid);
+
+    if (!is_network_fd(fd)) {
+        return 0;   // missed entry
+    }
+
+
+    bpf_trace_printk("writev: socket fd: %d, with pid_tgid: %d\n",
+                     fd, bpf_get_current_pid_tgid());
+
     send_data.sockfd = (u64)fd;
     send_data.len = iovcnt;
     writev_events.perf_submit(ctx, &send_data, sizeof(send_data));
 
-    u64 pid_tgid = bpf_get_current_pid_tgid();
     u64 sockfd = (u64)fd;
     pid_to_curr_fd.insert(&pid_tgid, &sockfd);
     return 0;
@@ -586,7 +649,7 @@ int trace_writev_return(struct pt_regs *ctx) {
         return 0;
     };
     send_data.sockfd = *fd;
-    send_data.len = (u64)PT_REGS_RC(ctx);
+    send_data.len = PT_REGS_RC(ctx);
 
     writev_return_events.perf_submit(ctx, &send_data, sizeof(send_data));
     pid_to_curr_fd._delete(&pid_tgid);
@@ -628,8 +691,7 @@ int trace_read_return(struct pt_regs *ctx) {
         return 0;
     };
     send_data.sockfd = *fd;
-    send_data.len = (u64)PT_REGS_RC(ctx);
-
+    send_data.len = PT_REGS_RC(ctx);
     read_return_events.perf_submit(ctx, &send_data, sizeof(send_data));
     pid_to_curr_fd._delete(&pid_tgid);
     return 0;
@@ -670,7 +732,7 @@ int trace_readv_return(struct pt_regs *ctx) {
         return 0;
     };
     send_data.sockfd = *fd;
-    send_data.len = (u64)PT_REGS_RC(ctx);
+    send_data.len = PT_REGS_RC(ctx);
 
     readv_return_events.perf_submit(ctx, &send_data, sizeof(send_data));
     pid_to_curr_fd._delete(&pid_tgid);
@@ -692,7 +754,7 @@ int trace_socket_entry(struct pt_regs *ctx,
 
     bpf_trace_printk("Domain: %d, type: %d, protocol: %d\n",
                      domain, type, protocol);
-    send_data.len = (u64)domain;
+    send_data.len = domain;
     send_data.flags = (u64)type;
     if (domain != PF_INET) {
         return 0;
@@ -712,7 +774,7 @@ int trace_socket_return(struct pt_regs *ctx) {
     if (!socket_pids.lookup(&pid_tgid)) {
         return 0;
     } else {
-//        socket_pids._delete(&pid_tgid);
+        socket_pids._delete(&pid_tgid);
     }
 
     struct send_data_t send_data = {};
@@ -721,12 +783,8 @@ int trace_socket_return(struct pt_regs *ctx) {
         return 0;
     };
     send_data.sockfd = (u64)PT_REGS_RC(ctx);
+    set_network_fd(send_data.sockfd);
 
-    struct pid_fd net_data;
-    net_data.fd = (u64)PT_REGS_RC(ctx);
-    net_data.pid_tgid = pid_tgid;
-    u64 val = 1;
-    network_fds.insert(&net_data, &val);
     socket_return_events.perf_submit(ctx, &send_data, sizeof(send_data));
 }
 
@@ -739,6 +797,11 @@ int trace_close_entry(struct pt_regs *ctx, int fd) {
     net_data.fd = (u64)fd;
     net_data.pid_tgid = bpf_get_current_pid_tgid();
     network_fds._delete(&net_data);
+
+    struct pid_fd parent_data;
+    parent_data.fd = (u64)fd;
+    parent_data.pid_tgid = get_parent_pid_tgid();
+    network_fds._delete(&parent_data);
 
     struct send_data_t send_data = {};
     get_thread_metadata(&send_data);
@@ -783,11 +846,7 @@ int trace_accept_return(struct pt_regs *ctx)
         return -1;
     }
 
-    struct pid_fd net_data;
-    net_data.fd = (u64)fd;
-    net_data.pid_tgid = bpf_get_current_pid_tgid();
-    u64 val = 1;
-    network_fds.insert(&net_data, &val);
+    set_network_fd(fd);
 
     struct send_data_t send_data = {};
     get_thread_metadata(&send_data);
@@ -822,11 +881,8 @@ int trace_accept4_return(struct pt_regs *ctx)
         return -1;
     }
 
-    struct pid_fd net_data;
-    net_data.fd = (u64)fd;
-    net_data.pid_tgid = bpf_get_current_pid_tgid();
-    u64 val = 1;
-    network_fds.insert(&net_data, &val);
+    // Mark current process and parent process as a network FD
+    set_network_fd(fd);
 
     struct send_data_t send_data = {};
     get_thread_metadata(&send_data);
@@ -866,11 +922,7 @@ int trace_bind_entry(struct pt_regs *ctx,
     send_data.saddr = s_addr;
     send_data.sport = ntohs(port);
 
-    struct pid_fd net_data;
-    net_data.fd = sockfd;
-    net_data.pid_tgid = bpf_get_current_pid_tgid();
-    u64 val = 1;
-    network_fds.insert(&net_data, &val);
+    set_network_fd(sockfd);
 
     bind_events.perf_submit(ctx, &send_data, sizeof(send_data));
     return 0;

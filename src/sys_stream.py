@@ -58,8 +58,8 @@ parser.add_argument("--nopid",
                     help="don't trace this PID")
 parser.add_argument("--comm",
                     help="trace this COMM")
-parser.add_argument("--net", action="store_true",
-                    help="Filter net only")
+parser.add_argument("--all", action="store_true",
+                    help="Get all syscalls from sockets, not just AF_INET / AF_INET6")
 parser.add_argument("--notcomm",
                     help="exclude those COMM",
                     action="store_true")
@@ -89,7 +89,7 @@ if args.nopid:
             'u64 pid = send_data->pid;\n'
             'if (pid == %s) { return 0; }' % args.nopid, bpf_text)
 
-if not args.net:
+if args.all:
     print("not filtering net")
     bpf_text = re.sub(r'//\s+FILTER NET',
                       '\treturn true;', bpf_text)
@@ -132,8 +132,8 @@ def inet_ntoa(addr):
 
 bpf_text = bpf_text.replace("._delete", ".delete")
 
-# if args.debug:
-#     print(bpf_text)
+if args.debug:
+    print(bpf_text)
 
 # event data
 TASK_COMM_LEN = 16      # linux/sched.h
@@ -145,7 +145,7 @@ class Data_send(ct.Structure):
         ("tgid", ct.c_longlong),
         ("ppid", ct.c_longlong),
         ("sockfd", ct.c_ulonglong),
-        ("len", ct.c_ulonglong),
+        ("len", ct.c_int),
         ("flags", ct.c_ulonglong),
         ("saddr", ct.c_ulonglong),
         ("sport", ct.c_ulonglong),
