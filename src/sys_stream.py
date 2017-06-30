@@ -23,6 +23,8 @@ import argparse
 from socket import ntohs, inet_ntop, AF_INET
 import ctypes as ct
 
+RING_BUFFER_PAGE_CNT = 2 << 7
+
 # arguments
 # from kafka_source import BpfProducer
 
@@ -33,7 +35,7 @@ examples = """examples:
     ./sys_stream -t        # include timestamps
     ./sys_stream -p 181    # only trace PID 181
     ./sys_stream -P 80     # only trace port 80
-    ./sys_stream.py -d -t --nocomm sudo,sshd -o wget_`date +%m-%d-%H:%M.%S`.out
+    ./sys_stream.py -d -t --notcomm --comm sudo,sshd -o wget_`date +%m-%d-%H:%M.%S`.out
 """
 parser = argparse.ArgumentParser(
     description="Trace TCP connects",
@@ -54,8 +56,13 @@ parser.add_argument("-p", "--pid",
                     help="trace this PID only")
 parser.add_argument("--nopid",
                     help="don't trace this PID")
-parser.add_argument("--nocomm",
-                    help="don't trace this COMM")
+parser.add_argument("--comm",
+                    help="trace this COMM")
+parser.add_argument("--net", action="store_true",
+                    help="Filter net only")
+parser.add_argument("--notcomm",
+                    help="exclude those COMM",
+                    action="store_true")
 parser.add_argument("-P", "--port",
                     help="comma-separated list of destination ports to trace.")
 args = parser.parse_args()
@@ -75,25 +82,33 @@ if args.pid:
     bpf_text = re.sub(r'//\s+FILTER PID',
             'u64 pid = send_data->pid;\n'
             'if (pid != %s) { return 0; }' % args.pid, bpf_text)
+
 if args.nopid:
     print("filtering out pid: %s"  % args.nopid)
     bpf_text = re.sub(r'//\s+FILTER OUT PID',
             'u64 pid = send_data->pid;\n'
             'if (pid == %s) { return 0; }' % args.nopid, bpf_text)
-if args.nocomm:
+
+if not args.net:
+    print("not filtering net")
+    bpf_text = re.sub(r'//\s+FILTER NET',
+                      '\treturn true;', bpf_text)
+
+if args.comm:
     compare_strs = []
-    for comm in args.nocomm.split(','):
+    for comm in args.comm.split(','):
         print("filtering out comm: %s"  % comm)
         compare_str = []
         for i, c in enumerate(comm):
             compare_str.append("task[{i}] == '{c}'".format(
                 i=i, c=comm[i]))
         compare_strs.append('(' + " && ".join(compare_str) + ')')
-
     bpf_text = re.sub(r'//\s+FILTER OUT COMM',
                       '    char *task = send_data->task;\n'
-                      '    if ({compare_strs}) {{ return 0; }}'.format(
+                      '    if ({exclude}(\n\t{compare_strs}\n\t)) {{ return 0; }}'.format(
+                          exclude="" if args.notcomm else "!",
                           compare_strs=" || \n\t\t".join(compare_strs)), bpf_text)
+
 if args.port:
     print("substituting for ports: %s"  % args.port)
     dports = [int(dport) for dport in args.port.split(',')]
@@ -169,13 +184,19 @@ def print_event(func_name, data, is_return=False):
             daddr=daddr, dport=dport)
 
     if "send" in func_name or "write" in func_name:
-        notes = "Sending {} bytes".format(event.len)
+        if func_name == "writev" and not is_return:
+            notes = "Sending with iocnt={}".format(event.len)
+        else:
+            notes = "Sending {} bytes".format(event.len)
 
     if "read" in func_name or "recv" in func_name:
-        if is_return:
-            notes = "{} bytes received".format(event.len)
+        if func_name == "readv" and not is_return:
+            notes = "Reading with iocnt={}".format(event.len)
         else:
-            notes = "Receiving <= {} bytes...".format(event.len)
+            if is_return:
+                notes = "{} bytes received".format(event.len)
+            else:
+                notes = "Receiving <= {} bytes...".format(event.len)
 
     elif func_name == "socket" and not is_return:
         family = "AF_INET" if event.len == 2 else "unknown"
@@ -214,7 +235,9 @@ syscalls = [
     ("connect", False),
     ("bind", False),
     ("accept", True),
+    ("accept4", True),
     ("send", False),
+    ("sendfile", False),
     ("sendmsg", False),
     ("sendmmsg", False),
     ("recvmsg", False),
@@ -222,7 +245,9 @@ syscalls = [
     ("recv", False),
     ("recvfrom", True),
     ("write", False),
+    ("writev", True),
     ("read", True),
+    ("readv", True),
     ("close", False),
     ("socket", True),
     ("shutdown", False)
@@ -235,23 +260,25 @@ for syscall, do_return in syscalls:
                     fn_name="trace_{}_entry".format(syscall))
     b[syscall + "_events"].open_perf_buffer(
         lambda cpu, data, size, event_name=syscall: print_event(event_name, data, is_return=False),
-        page_cnt=2 << 5)
+        page_cnt=RING_BUFFER_PAGE_CNT)
     if do_return:
         b.attach_kretprobe(event=syscall_fn,
                            fn_name="trace_{}_return".format(syscall))
         b[syscall + "_return_events"].open_perf_buffer(
             lambda cpu, data, size, event_name=syscall: print_event(event_name, data, is_return=True),
-            page_cnt=2 << 5)
+            page_cnt=RING_BUFFER_PAGE_CNT)
 
 b.attach_kprobe(event="tcp_v4_connect", fn_name="trace_connect_v4_entry")
 b["tcp_v4_connect_return_events"].open_perf_buffer(
-    lambda cpu, data, size, event_name="tcp_v4_connect": print_event(event_name, data, is_return=True))
+    lambda cpu, data, size, event_name="tcp_v4_connect": print_event(event_name, data, is_return=True),
+    page_cnt=RING_BUFFER_PAGE_CNT)
 b.attach_kretprobe(event="tcp_v4_connect", fn_name="trace_connect_v4_return")
 
 
 b.attach_kretprobe(event="inet_csk_accept", fn_name="trace_inet_csk_accept_return")
 b["inet_csk_accept_return_events"].open_perf_buffer(
-    lambda cpu, data, size, event_name="inet_csk_accept": print_event(event_name, data, is_return=True))
+    lambda cpu, data, size, event_name="inet_csk_accept": print_event(event_name, data, is_return=True),
+    page_cnt=RING_BUFFER_PAGE_CNT)
 
 
 while 1:

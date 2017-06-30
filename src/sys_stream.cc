@@ -42,9 +42,12 @@ BPF_PERF_OUTPUT(connect_events);
 BPF_PERF_OUTPUT(tcp_v4_connect_return_events);
 BPF_PERF_OUTPUT(bind_events);
 BPF_PERF_OUTPUT(accept_events);
+BPF_PERF_OUTPUT(accept4_events);
+BPF_PERF_OUTPUT(accept4_return_events);
 BPF_PERF_OUTPUT(inet_csk_accept_return_events);
 BPF_PERF_OUTPUT(accept_return_events);
 BPF_PERF_OUTPUT(send_events);
+BPF_PERF_OUTPUT(sendfile_events);
 BPF_PERF_OUTPUT(sendmsg_events);
 BPF_PERF_OUTPUT(sendmmsg_events);
 BPF_PERF_OUTPUT(recvmsg_events);
@@ -53,8 +56,12 @@ BPF_PERF_OUTPUT(recv_events);
 BPF_PERF_OUTPUT(recvfrom_events);
 BPF_PERF_OUTPUT(recvfrom_return_events);
 BPF_PERF_OUTPUT(write_events);
+BPF_PERF_OUTPUT(writev_events);
+BPF_PERF_OUTPUT(writev_return_events);
 BPF_PERF_OUTPUT(read_events);
 BPF_PERF_OUTPUT(read_return_events);
+BPF_PERF_OUTPUT(readv_events);
+BPF_PERF_OUTPUT(readv_return_events);
 BPF_PERF_OUTPUT(close_events);
 BPF_PERF_OUTPUT(socket_events);
 BPF_PERF_OUTPUT(socket_return_events);
@@ -71,6 +78,7 @@ static int is_network_fd(int fd) {
     network_data.pid_tgid = bpf_get_current_pid_tgid();
     network_data.fd = (u64) fd;
     u64 *found = network_fds.lookup(&network_data);
+// FILTER NET
     return found != NULL;
 }
 
@@ -215,12 +223,52 @@ int trace_connect_v4_return(struct pt_regs *ctx) {
     return 0;
 }
 
+
+//int trace_inet_csk_accept_entry(struct pt_regs *ctx,
+//                                struct sock *sk, int flags, int *err)
+//{
+//    struct sock *newsk = (struct sock *)PT_REGS_RC(ctx);
+////    if (newsk == NULL) {
+////        return 0;
+////    }
+//    struct send_data_t send_data = {};
+//    get_thread_metadata(&send_data);
+//    if (!apply_filter(&send_data)) {
+//        return 0;
+//    };
+//    send_data.sockfd = sk->sk_socket->file;
+//
+//    // check this is TCP
+//    u8 protocol = 0;
+//    // workaround for reading the sk_protocol bitfield:
+//    bpf_probe_read(&protocol, 1, (void *)((long)&newsk->sk_wmem_queued) - 3);
+//    if (protocol != IPPROTO_TCP)
+//        return 0;
+//
+//    // pull in details
+//    u16 family = 0, sport = 0, dport = 0;
+//    bpf_probe_read(&family, sizeof(family), &newsk->__sk_common.skc_family);
+//    bpf_probe_read(&sport, sizeof(sport), &newsk->__sk_common.skc_num);
+//    bpf_probe_read(&dport, sizeof(dport), &newsk->__sk_common.skc_dport);
+//    send_data.sport = sport;
+//    send_data.dport = dport;
+//
+//    bpf_probe_read(&send_data.saddr, sizeof(u32),
+//                   &newsk->__sk_common.skc_rcv_saddr);
+//    bpf_probe_read(&send_data.daddr, sizeof(u32),
+//                   &newsk->__sk_common.skc_daddr);
+//    bpf_get_current_comm(&send_data.task, sizeof(send_data.task));
+//    inet_csk_accept_return_events.perf_submit(ctx, &send_data, sizeof(send_data));
+//
+//    return 0;
+//}
+
 int trace_inet_csk_accept_return(struct pt_regs *ctx)
 {
     struct sock *newsk = (struct sock *)PT_REGS_RC(ctx);
-    if (newsk == NULL) {
-        return 0;
-    }
+//    if (newsk == NULL) {
+//        return 0;
+//    }
     struct send_data_t send_data = {};
     get_thread_metadata(&send_data);
     if (!apply_filter(&send_data)) {
@@ -265,6 +313,23 @@ int trace_send_entry(struct pt_regs *ctx, int sockfd,
     send_events.perf_submit(ctx, &send_data, sizeof(send_data));
     return 0;
 };
+
+
+int trace_sendfile_entry(struct pt_regs *ctx,
+                         int out_fd, int in_fd, off_t *offset, size_t len)
+{
+    struct send_data_t send_data = {};
+    get_thread_metadata(&send_data);
+    if (!apply_filter(&send_data)) {
+        return 0;
+    };
+
+    send_data.len = len;
+    send_data.sockfd = in_fd;
+    sendfile_events.perf_submit(ctx, &send_data, sizeof(send_data));
+    return 0;
+};
+
 
 
 int trace_sendmsg_entry(struct pt_regs *ctx,
@@ -470,7 +535,6 @@ int trace_sendto_entry(struct pt_regs *ctx,
 
 int trace_write_entry(struct pt_regs *ctx,
                       int fd, const void *buf, size_t len) {
-
     if (!is_network_fd(fd)) {
         return 0;   // missed entry
     }
@@ -486,6 +550,48 @@ int trace_write_entry(struct pt_regs *ctx,
     return 0;
 }
 
+
+int trace_writev_entry(struct pt_regs *ctx,
+                       int fd, const struct iovec *iov, int iovcnt) {
+    if (!is_network_fd(fd)) {
+        return 0;   // missed entry
+    }
+
+    struct send_data_t send_data = {};
+    get_thread_metadata(&send_data);
+    if (!apply_filter(&send_data)) {
+        return 0;
+    };
+    send_data.sockfd = (u64)fd;
+    send_data.len = iovcnt;
+    writev_events.perf_submit(ctx, &send_data, sizeof(send_data));
+
+    u64 pid_tgid = bpf_get_current_pid_tgid();
+    u64 sockfd = (u64)fd;
+    pid_to_curr_fd.insert(&pid_tgid, &sockfd);
+    return 0;
+}
+
+
+int trace_writev_return(struct pt_regs *ctx) {
+    u64 pid_tgid = bpf_get_current_pid_tgid();
+    u64 *fd = pid_to_curr_fd.lookup(&pid_tgid);
+    if (fd == 0) {
+        return 0; // missed entry (not a network read)
+    }
+
+    struct send_data_t send_data = {};
+    get_thread_metadata(&send_data);
+    if (!apply_filter(&send_data)) {
+        return 0;
+    };
+    send_data.sockfd = *fd;
+    send_data.len = (u64)PT_REGS_RC(ctx);
+
+    writev_return_events.perf_submit(ctx, &send_data, sizeof(send_data));
+    pid_to_curr_fd._delete(&pid_tgid);
+    return 0;
+}
 
 int trace_read_entry(struct pt_regs *ctx,
                      int fd, const void *buf, size_t len) {
@@ -530,6 +636,47 @@ int trace_read_return(struct pt_regs *ctx) {
 }
 
 
+int trace_readv_entry(struct pt_regs *ctx,
+                      int fd, const struct iovec *iov, int iovcnt) {
+    if (!is_network_fd(fd)) {
+        return 0;   // missed entry
+    }
+
+    struct send_data_t send_data = {};
+    get_thread_metadata(&send_data);
+    if (!apply_filter(&send_data)) {
+        return 0;
+    };
+    send_data.sockfd = (u64)fd;
+    readv_events.perf_submit(ctx, &send_data, sizeof(send_data));
+
+    // Keep track of sockfd for noting read call
+    u64 pid_tgid = bpf_get_current_pid_tgid();
+    u64 sockfd = (u64)fd;
+    pid_to_curr_fd.insert(&pid_tgid, &sockfd);
+    return 0;
+}
+
+int trace_readv_return(struct pt_regs *ctx) {
+    u64 pid_tgid = bpf_get_current_pid_tgid();
+    u64 *fd = pid_to_curr_fd.lookup(&pid_tgid);
+    if (fd == 0) {
+        return 0; // missed entry (not a network read)
+    }
+
+    struct send_data_t send_data = {};
+    get_thread_metadata(&send_data);
+    if (!apply_filter(&send_data)) {
+        return 0;
+    };
+    send_data.sockfd = *fd;
+    send_data.len = (u64)PT_REGS_RC(ctx);
+
+    readv_return_events.perf_submit(ctx, &send_data, sizeof(send_data));
+    pid_to_curr_fd._delete(&pid_tgid);
+    return 0;
+}
+
 struct event_t {
     int pid;
     int tgid;
@@ -573,9 +720,9 @@ int trace_socket_return(struct pt_regs *ctx) {
     if (!apply_filter(&send_data)) {
         return 0;
     };
+    send_data.sockfd = (u64)PT_REGS_RC(ctx);
 
     struct pid_fd net_data;
-    send_data.sockfd = (u64)PT_REGS_RC(ctx);
     net_data.fd = (u64)PT_REGS_RC(ctx);
     net_data.pid_tgid = pid_tgid;
     u64 val = 1;
@@ -609,6 +756,7 @@ int trace_shutdown_entry(struct pt_regs *ctx, int fd) {
     if (!apply_filter(&send_data)) {
         return 0;
     };
+    send_data.sockfd = fd;
     shutdown_events.perf_submit(ctx, &send_data, sizeof(send_data));
     return 0;
 }
@@ -625,6 +773,7 @@ int trace_accept_entry(struct pt_regs *ctx,
     accept_events.perf_submit(ctx, &send_data, sizeof(send_data));
     return 0;
 }
+
 
 int trace_accept_return(struct pt_regs *ctx)
 {
@@ -651,6 +800,44 @@ int trace_accept_return(struct pt_regs *ctx)
     return 0;
 }
 
+int trace_accept4_entry(struct pt_regs *ctx,
+                       int sockfd, struct sockaddr *addr, int *addrlen)
+{
+    struct send_data_t send_data = {};
+    get_thread_metadata(&send_data);
+    if (!apply_filter(&send_data)) {
+        return 0;
+    };
+    send_data.sockfd = (u64)sockfd;
+
+    accept4_events.perf_submit(ctx, &send_data, sizeof(send_data));
+    return 0;
+}
+
+int trace_accept4_return(struct pt_regs *ctx)
+{
+    int fd = PT_REGS_RC(ctx);
+    if (fd < 0) {
+        // Often times a EAGAIN (resource temp. unavailable)
+        return -1;
+    }
+
+    struct pid_fd net_data;
+    net_data.fd = (u64)fd;
+    net_data.pid_tgid = bpf_get_current_pid_tgid();
+    u64 val = 1;
+    network_fds.insert(&net_data, &val);
+
+    struct send_data_t send_data = {};
+    get_thread_metadata(&send_data);
+    if (!apply_filter(&send_data)) {
+        return 0;
+    };
+    send_data.sockfd = (u64)fd;
+
+    accept4_return_events.perf_submit(ctx, &send_data, sizeof(send_data));
+    return 0;
+}
 
 int trace_bind_entry(struct pt_regs *ctx,
                      int sockfd, struct sockaddr *addr, int *addrlen) {
@@ -664,6 +851,7 @@ int trace_bind_entry(struct pt_regs *ctx,
     if (!apply_filter(&send_data)) {
         return 0;
     };
+    send_data.sockfd = sockfd;
 
     struct sockaddr_in *ipv4 = NULL;
     bpf_probe_read(&ipv4, sizeof(ipv4), &addr);
@@ -677,6 +865,12 @@ int trace_bind_entry(struct pt_regs *ctx,
 
     send_data.saddr = s_addr;
     send_data.sport = ntohs(port);
+
+    struct pid_fd net_data;
+    net_data.fd = sockfd;
+    net_data.pid_tgid = bpf_get_current_pid_tgid();
+    u64 val = 1;
+    network_fds.insert(&net_data, &val);
 
     bind_events.perf_submit(ctx, &send_data, sizeof(send_data));
     return 0;
