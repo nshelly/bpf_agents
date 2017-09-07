@@ -238,7 +238,7 @@ def print_event(func_name, data, is_return=False):
     f.write(json.dumps())
     json.dump(data, file)
 
-   if has_sockfd:
+    if has_sockfd:
         data["sockfd"] = event.sockfd
 
 # initialize BPF
