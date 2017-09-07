@@ -13,17 +13,18 @@
 from __future__ import print_function
 
 import re
-import sys
 
+import datetime
+from time import sleep
 from bcc import BPF
 from struct import pack
 
-print("\n".join(sys.path))
 import argparse
 from socket import ntohs, inet_ntop, AF_INET
 import ctypes as ct
 
 RING_BUFFER_PAGE_CNT = 2 << 7
+DEFAULT_FILE_NAME = "stream_log_{}.csv".format(datetime.datetime.now().strftime("%m-%d_%H:%M:%S"))
 
 # arguments
 # from kafka_source import BpfProducer
@@ -41,10 +42,10 @@ parser = argparse.ArgumentParser(
     description="Trace TCP connects",
     formatter_class=argparse.RawDescriptionHelpFormatter,
     epilog=examples)
-parser.add_argument("-d", "--debug", action="store_true",
-                    help="Debug mode")
+parser.add_argument("-v", "--verbose", action="store_true",
+                    help="Verbose mode")
 parser.add_argument("-o", "--output",
-                    default=None,
+                    default=DEFAULT_FILE_NAME,
                     help="Output to file")
 parser.add_argument("--trace", action="store_true",
                     help="Print trace readlines")
@@ -52,6 +53,8 @@ parser.add_argument("-s", "--kafka-server",
                     help="Kafka bootstrap server and port")
 parser.add_argument("-t", "--timestamp", action="store_true",
                     help="include timestamp on output")
+parser.add_argument("--local_only", action="store_true",
+                    help="don't send data")
 parser.add_argument("-p", "--pid",
                     help="trace this PID only")
 parser.add_argument("--nopid",
@@ -118,8 +121,6 @@ if args.port:
                       '    if (%s) { currsock.delete(&pid); return 0; }' % dports_if,
                       bpf_text)
 
-output = open(args.output, "w+") if args.output else None
-
 def inet_ntoa(addr):
     dq = ''
     for i in range(0, 4):
@@ -132,7 +133,7 @@ def inet_ntoa(addr):
 
 bpf_text = bpf_text.replace("._delete", ".delete")
 
-if args.debug:
+if args.verbose:
     print(bpf_text)
 
 # event data
@@ -165,14 +166,26 @@ def print_event(func_name, data, is_return=False):
     if args.timestamp:
         if start_ts == 0:
             start_ts = event.ts_us
-        print("%-9.4f" % ((float(event.ts_us) - start_ts) / 1000000), end="",
-              file=output)
+        curr_ts = (float(event.ts_us) - start_ts) / 1000000
+        print("%-9.5f" % (curr_ts), end="")
+              # file=args.output)
+
+    data = {
+        "timestamp": curr_ts,
+        "func": func_name + ("_RETURN" if is_return else ""),
+        "pid": event.pid,
+        "task": event.task.decode(),
+        "ppid": event.ppid,
+        "ptask": event.parent_task.decode(),
+    }
 
     notes = ""
     if "bind" in func_name:
         sport = event.sport
         saddr = inet_ntop(AF_INET, pack("I", event.saddr))
         notes = "{saddr}:{sport}".format(saddr=saddr, sport=sport)
+        data["sourceAddress"] = saddr
+        data["sourcePort"] = sport
 
     elif "connect" in func_name or func_name == "inet_csk_accept":
         sport = event.sport
@@ -182,12 +195,17 @@ def print_event(func_name, data, is_return=False):
         notes = "{saddr}{sport} -> {daddr}:{dport}".format(
             saddr=(saddr + ":") if saddr else "", sport=sport or "",
             daddr=daddr, dport=dport)
+        data["sourceAddress"] = saddr
+        data["sourceAddress"] = saddr
+        data["destAddress"] = sport
+        data["destPort"] = sport
 
     if "send" in func_name or "write" in func_name:
         if func_name == "writev" and not is_return:
             notes = "Sending with iocnt={}".format(event.len)
         else:
             notes = "Sending {} bytes".format(event.len)
+        data["bytes"] = event.len
 
     if "read" in func_name or "recv" in func_name:
         if func_name == "readv" and not is_return:
@@ -197,6 +215,7 @@ def print_event(func_name, data, is_return=False):
                 notes = "{} bytes received".format(event.len)
             else:
                 notes = "Receiving <= {} bytes...".format(event.len)
+        data["bytes"] = event.len
 
     elif func_name == "socket" and not is_return:
         family = "AF_INET" if event.len == 2 else "unknown"
@@ -210,24 +229,32 @@ def print_event(func_name, data, is_return=False):
            event.ppid, event.parent_task.decode(),
            event.sockfd if has_sockfd else "",
            notes),
-          end="\n",
-          file=output)
+          end="\n")
+          # file=args.output)
 
+    file = open(args.output, "w+")
+
+    import json
+    f.write(json.dumps())
+    json.dump(data, file)
+
+   if has_sockfd:
+        data["sockfd"] = event.sockfd
 
 # initialize BPF
 b = BPF(text=bpf_text)
 
 # header
 if args.timestamp:
-    print("%-9s" % ("TIME(s)"), end="", file=output)
+    print("%-9s" % ("TIME(s)"), end="") #file=args.output)
 # print("%-10s %-8s %-12.12s %-16s %-4s %-6s %-6s %-6s %-6s %-6s" % \
 #       ("FUNC", "PID", "COMM", "DADDR", "DFAM", "DPORT",
 #         "ADDR_LEN", "SOCKFD", "LEN", "FLAGS"))
 
 print("%-20s %-8s %-8s %-12.12s %-12.12s %-6s %-6s %-6s" % \
       ("FUNC", "PID", "COMM", "PPID", "PCOMM", "SOCKFD", "LEN", "Notes"),
-      end="\n",
-      file=output)
+      end="\n")
+      # file=args.output)
 
 start_ts = 0
 
@@ -254,7 +281,8 @@ syscalls = [
 ]
 
 for syscall, do_return in syscalls:
-    # print("Attaching: {syscall}, tracing_return? {do_return}".format(syscall=syscall, do_return=do_return))
+    if args.verbose:
+        print("Attaching: {syscall}, tracing_return? {do_return}".format(syscall=syscall, do_return=do_return))
     syscall_fn = "sys_{}".format(syscall)
     b.attach_kprobe(event=syscall_fn,
                     fn_name="trace_{}_entry".format(syscall))
@@ -286,3 +314,28 @@ while 1:
         print(b.trace_readline())
     else:
         b.kprobe_poll()
+            # sleep(2)
+        # except KeyboardInterrupt:
+        #     print("Pressed Ctrl+C")
+        #     break
+
+        # calls = b.get_table("calls")
+        # stack_traces = b.get_table("stack_traces")
+
+        # for k, v in sorted(calls.items(), key=lambda calls: calls[1].value):
+        #     user_stack = [] if k.user_stack_id < 0 else \
+        #                     stack_traces.walk(k.user_stack_id)
+        #     kernel_stack = [] if k.kernel_stack_id < 0 else \
+        #                     stack_traces.walk(k.kernel_stack_id)
+        #
+        #     for addr in kernel_stack:
+        #         print("    %s" % b.ksym(addr, show_module=True, show_offset=True))
+        #     print("    --")
+        #     for addr in user_stack:
+        #         print("    %s" % b.sym(addr, k.tgid, show_module=True, show_offset=True))
+        #     print("####")
+        #     # for k, v in reversed(sorted(calls.items(), key=lambda c: c[1].value)):
+        #     #     print("%d bytes allocated at:" % v.value)
+        #     #     for addr in stack_traces.walk(k.value):
+        #     #         # print("\t%s" % b.sym(addr, pid, show_offset=True))
+        #     #         print("\t%s" % b.sym(addr, show_offset=True))

@@ -38,6 +38,17 @@ struct send_data_t {
     char task[TASK_COMM_LEN];
 };
 
+struct key_t {
+    u32 pid;
+    u32 tgid;
+    int user_stack_id;
+    int kernel_stack_id;
+    char name[TASK_COMM_LEN];
+};
+
+BPF_HASH(calls, struct key_t);
+BPF_STACK_TRACE(stack_traces, 1024)
+
 BPF_PERF_OUTPUT(connect_events);
 BPF_PERF_OUTPUT(tcp_v4_connect_return_events);
 BPF_PERF_OUTPUT(bind_events);
@@ -90,7 +101,7 @@ static u64 get_parent_pid_tgid() {
     bpf_probe_read(&tgid,
                    sizeof(tgid),
                    &real_parent_task->tgid);
-    return ((ppid << 32) | (tgid & 0xffffffff));
+    return ((ppid & 0xffffffff) | (tgid << 32));
 }
 
 static void set_network_fd(u64 fd) {
@@ -146,7 +157,7 @@ get_thread_metadata(struct send_data_t *send_data) {
 
 //    bpf_trace_printk("real_parent_task: %s, real_parent_pid: %s\n",
 //                     real_parent_task, ppid);
-    send_data->ppid = get_parent_pid_tgid() >> 32;
+    send_data->ppid = get_parent_pid_tgid() & 0xffffffff;
     send_data->ts_us = bpf_ktime_get_ns() / 1000,
     bpf_get_current_comm(&send_data->task, sizeof(send_data->task));
 }
@@ -662,6 +673,17 @@ int trace_read_entry(struct pt_regs *ctx,
         return 0;   // missed entry
     }
 
+    struct key_t key = {};
+    key.pid = bpf_get_current_pid();
+    key.tgid = bpf_get_current_tgid();
+    key.user_stack_id = stack_traces.get_stackid(ctx, BPF_F_REUSE_STACKID | BPF_F_USER_STACK);
+    key.kernel_stack_id = stack_traces.get_stackid(ctx, BPF_F_REUSE_STACKID);
+    bpf_get_current_comm(&key.name, sizeof(key.name));
+
+    u64 zero = 0, *val;
+    val = calls.lookup_or_init(&key, &zero);
+    (*val) += len;
+
     struct send_data_t send_data = {};
     get_thread_metadata(&send_data);
     if (!apply_filter(&send_data)) {
@@ -670,6 +692,8 @@ int trace_read_entry(struct pt_regs *ctx,
     send_data.sockfd = (u64)fd;
     send_data.len = len;
     read_events.perf_submit(ctx, &send_data, sizeof(send_data));
+
+    bpf_trace_printk("read: %d, len: %d\n", fd, len);
 
     // Keep track of sockfd for noting read call
     u64 pid_tgid = bpf_get_current_pid_tgid();
