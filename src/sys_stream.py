@@ -36,7 +36,7 @@ examples = """examples:
     ./sys_stream -t        # include timestamps
     ./sys_stream -p 181    # only trace PID 181
     ./sys_stream -P 80     # only trace port 80
-    ./sys_stream.py -d -t --notcomm --comm sudo,sshd -o wget_`date +%m-%d-%H:%M.%S`.out
+    ./sys_stream.py -t --notcomm --comm sudo,sshd -o wget_`date +%m-%d-%H:%M.%S`.out
 """
 parser = argparse.ArgumentParser(
     description="Trace TCP connects",
@@ -69,6 +69,8 @@ parser.add_argument("--notcomm",
 parser.add_argument("-P", "--port",
                     help="comma-separated list of destination ports to trace.")
 args = parser.parse_args()
+
+output_file = open(args.output, "w+")
 
 with open("sys_stream.cc", "r") as f:
     bpf_text = f.read()
@@ -232,14 +234,15 @@ def print_event(func_name, data, is_return=False):
           end="\n")
           # file=args.output)
 
-    file = open(args.output, "w+")
-
     import json
-    f.write(json.dumps())
-    json.dump(data, file)
+    output_file.write(json.dumps(data, sort_keys=True, indent=4))
+    # json.dump(data, file)
 
     if has_sockfd:
         data["sockfd"] = event.sockfd
+
+
+print("Writing to ", output_file.name)
 
 # initialize BPF
 b = BPF(text=bpf_text)
