@@ -85,22 +85,12 @@ BPF_PERF_OUTPUT(shutdown_events);
 
 
 static u64 get_parent_pid_tgid() {
-    struct task_struct *task;
-    struct task_struct *real_parent_task;
-    u64 ppid, tgid;
+    struct task_struct *task = (struct task_struct *)bpf_get_current_task();
+    struct task_struct *real_parent_task = task->real_parent;
 
-    task = (struct task_struct *)bpf_get_current_task();
-    bpf_probe_read(&real_parent_task,
-                   sizeof(real_parent_task),
-                   &task->real_parent);
+    u64 ppid = (u64)real_parent_task->pid;
+    u64 tgid = (u64)real_parent_task->tgid;
 
-    bpf_probe_read(&ppid,
-                   sizeof(ppid),
-                   &real_parent_task->pid);
-
-    bpf_probe_read(&tgid,
-                   sizeof(tgid),
-                   &real_parent_task->tgid);
     return ((ppid & 0xffffffff) | (tgid << 32));
 }
 
@@ -142,21 +132,15 @@ get_thread_metadata(struct send_data_t *send_data) {
     send_data->tgid = bpf_get_current_tgid();
 
     struct task_struct *task;
-    struct task_struct *real_parent_task;
-    u64 ppid;
 
     task = (struct task_struct *)bpf_get_current_task();
 
-    bpf_probe_read(&real_parent_task,
-                   sizeof(real_parent_task),
-                   &task->real_parent);
+    struct task_struct *real_parent_task = task->real_parent;
 
     bpf_probe_read(&send_data->parent_task,
                    sizeof(send_data->parent_task),
-                   &real_parent_task->comm);
+                   real_parent_task->comm);
 
-//    bpf_trace_printk("real_parent_task: %s, real_parent_pid: %s\n",
-//                     real_parent_task, ppid);
     send_data->ppid = get_parent_pid_tgid() & 0xffffffff;
     send_data->ts_us = bpf_ktime_get_ns() / 1000,
     bpf_get_current_comm(&send_data->task, sizeof(send_data->task));
@@ -207,7 +191,7 @@ int trace_connect_entry(struct pt_regs *ctx,
                      send_data.task, send_data.pid);
     bpf_trace_printk("connect: %s (sa_family: %d, sin_family: %d)\n",
                      send_data.task, addr->sa_family, dfamily);
-    bpf_trace_printk("-> %x:%d\n",
+    bpf_trace_printk("-> ip %x, port %d\n",
                      ntohl(daddr), ntohs(dport));
     connect_events.perf_submit(ctx, &send_data, sizeof(send_data));
     return 0;
@@ -606,33 +590,13 @@ int trace_writev_entry(struct pt_regs *ctx,
         return 0;
     };
 
-    struct task_struct *task;
-    struct task_struct *real_parent_task;
-    u64 ppid, tgid;
-
-    task = (struct task_struct *)bpf_get_current_task();
-
-    bpf_probe_read(&real_parent_task,
-                   sizeof(real_parent_task),
-                   &task->real_parent);
-
-    bpf_probe_read(&ppid,
-                   sizeof(ppid),
-                   &real_parent_task->pid);
-
-    bpf_probe_read(&tgid,
-                   sizeof(tgid),
-                   &real_parent_task->tgid);
-
     u64 pid_tgid = bpf_get_current_pid_tgid();
-    bpf_trace_printk("writev network_data pid_tgid: %lu, parent_data.pid_tgid: %lu,"
-                     "parent tgid: %d\n",
-                     pid_tgid, get_parent_pid_tgid(), tgid);
+    bpf_trace_printk("writev network_data pid_tgid: %lu, parent_data.pid_tgid: %lu\n",
+                     pid_tgid, get_parent_pid_tgid());
 
     if (!is_network_fd(fd)) {
         return 0;   // missed entry
     }
-
 
     bpf_trace_printk("writev: socket fd: %d, with pid_tgid: %d\n",
                      fd, bpf_get_current_pid_tgid());
@@ -775,6 +739,9 @@ int trace_socket_entry(struct pt_regs *ctx,
     if (!apply_filter(&send_data)) {
         return 0;
     };
+
+    bpf_trace_printk("real_parent_task: %s, real_parent_pid: %d\n",
+                     send_data.parent_task, send_data.ppid);
 
     bpf_trace_printk("Domain: %d, type: %d, protocol: %d\n",
                      domain, type, protocol);
