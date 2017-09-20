@@ -64,9 +64,11 @@ BPF_PERF_OUTPUT(sendmmsg_events);
 BPF_PERF_OUTPUT(recvmsg_events);
 BPF_PERF_OUTPUT(sendto_events);
 BPF_PERF_OUTPUT(recv_events);
+BPF_PERF_OUTPUT(recv_return_events);
 BPF_PERF_OUTPUT(recvfrom_events);
 BPF_PERF_OUTPUT(recvfrom_return_events);
 BPF_PERF_OUTPUT(write_events);
+BPF_PERF_OUTPUT(write_return_events);
 BPF_PERF_OUTPUT(writev_events);
 BPF_PERF_OUTPUT(writev_return_events);
 BPF_PERF_OUTPUT(read_events);
@@ -449,6 +451,8 @@ int trace_recvmsg_entry(struct pt_regs *ctx,
 
 int trace_recv_entry(struct pt_regs *ctx,
                      int sockfd, void *buf, size_t len, int flags) {
+    bpf_trace_printk("recv: fd: %d\n", sockfd);
+
     struct send_data_t send_data = {};
     get_thread_metadata(&send_data);
     if (!apply_filter(&send_data)) {
@@ -460,9 +464,38 @@ int trace_recv_entry(struct pt_regs *ctx,
     return 0;
 }
 
+int trace_recv_return(struct pt_regs *ctx) {
+    struct send_data_t send_data = {};
+    get_thread_metadata(&send_data);
+    if (!apply_filter(&send_data)) {
+        return 0;
+    };
+
+    u64 pid_tgid = bpf_get_current_pid_tgid();
+    bpf_trace_printk("recv return: pid_tgid: %d\n", pid_tgid);
+
+    u64 *fd = pid_to_curr_fd.lookup(&pid_tgid);
+    if (fd == 0) {
+        bpf_trace_printk("read return missed entry\n", fd);
+        return 0; // missed entry (not a network read)
+    }
+
+    get_thread_metadata(&send_data);
+    if (!apply_filter(&send_data)) {
+        return 0;
+    };
+    send_data.len = PT_REGS_RC(ctx);
+
+    recv_return_events.perf_submit(ctx, &send_data, sizeof(send_data));
+    pid_to_curr_fd._delete(&pid_tgid);
+    return 0;
+}
+
 int trace_recvfrom_entry(struct pt_regs *ctx,
                          int fd, void *buf, size_t len, int flags,
                          struct sockaddr *addr, int *fromlen) {
+    bpf_trace_printk("recvfrom: fd: %d\n", fd);
+
     if (!is_network_fd(fd)) {
         return 0;
     }
@@ -475,15 +508,14 @@ int trace_recvfrom_entry(struct pt_regs *ctx,
     send_data.sockfd = (u64)fd;
     send_data.len = len;
 
-    recvfrom_events.perf_submit(ctx, &send_data, sizeof(send_data));
-
     // Keep track of sockfd for noting read call
     u64 pid_tgid = bpf_get_current_pid_tgid();
     u64 sockfd = (u64)fd;
     pid_to_curr_fd.insert(&pid_tgid, &sockfd);
+
+    recvfrom_events.perf_submit(ctx, &send_data, sizeof(send_data));
     return 0;
 }
-
 
 int trace_recvfrom_return(struct pt_regs *ctx) {
     u64 pid_tgid = bpf_get_current_pid_tgid();
@@ -492,6 +524,8 @@ int trace_recvfrom_return(struct pt_regs *ctx) {
         return 0; // missed entry (not a network read)
     }
 
+    bpf_trace_printk("recvfrom return: pid_tgid: %d\n", pid_tgid);
+
     struct send_data_t send_data = {};
     get_thread_metadata(&send_data);
     if (!apply_filter(&send_data)) {
@@ -499,8 +533,8 @@ int trace_recvfrom_return(struct pt_regs *ctx) {
     };
     send_data.sockfd = *fd;
     send_data.len = PT_REGS_RC(ctx);
-    recvfrom_return_events.perf_submit(ctx, &send_data, sizeof(send_data));
 
+    recvfrom_return_events.perf_submit(ctx, &send_data, sizeof(send_data));
     pid_to_curr_fd._delete(&pid_tgid);
     return 0;
 }
@@ -577,10 +611,36 @@ int trace_write_entry(struct pt_regs *ctx,
     };
     send_data.sockfd = (u64)fd;
     send_data.len = len;
+
+    // Keep track of sockfd for noting write call
+    u64 pid_tgid = bpf_get_current_pid_tgid();
+    u64 sockfd = (u64)fd;
+    pid_to_curr_fd.insert(&pid_tgid, &sockfd);
+
     write_events.perf_submit(ctx, &send_data, sizeof(send_data));
     return 0;
 }
 
+int trace_write_return(struct pt_regs *ctx) {
+    u64 pid_tgid = bpf_get_current_pid_tgid();
+
+    u64 *fd = pid_to_curr_fd.lookup(&pid_tgid);
+    if (fd == 0) {
+        return 0; // missed entry (not a network read)
+    }
+
+    struct send_data_t send_data = {};
+    get_thread_metadata(&send_data);
+    if (!apply_filter(&send_data)) {
+        return 0;
+    };
+    send_data.sockfd = *fd;
+    send_data.len = PT_REGS_RC(ctx);
+
+    write_return_events.perf_submit(ctx, &send_data, sizeof(send_data));
+    pid_to_curr_fd._delete(&pid_tgid);
+    return 0;
+}
 
 int trace_writev_entry(struct pt_regs *ctx,
                        int fd, const struct iovec *iov, int iovcnt) {
@@ -637,17 +697,6 @@ int trace_read_entry(struct pt_regs *ctx,
         return 0;   // missed entry
     }
 
-    struct key_t key = {};
-    key.pid = bpf_get_current_pid();
-    key.tgid = bpf_get_current_tgid();
-    key.user_stack_id = stack_traces.get_stackid(ctx, BPF_F_REUSE_STACKID | BPF_F_USER_STACK);
-    key.kernel_stack_id = stack_traces.get_stackid(ctx, BPF_F_REUSE_STACKID);
-    bpf_get_current_comm(&key.name, sizeof(key.name));
-
-    u64 zero = 0, *val;
-    val = calls.lookup_or_init(&key, &zero);
-    (*val) += len;
-
     struct send_data_t send_data = {};
     get_thread_metadata(&send_data);
     if (!apply_filter(&send_data)) {
@@ -655,31 +704,38 @@ int trace_read_entry(struct pt_regs *ctx,
     };
     send_data.sockfd = (u64)fd;
     send_data.len = len;
-    read_events.perf_submit(ctx, &send_data, sizeof(send_data));
-
-    bpf_trace_printk("read: %d, len: %d\n", fd, len);
+//    bpf_trace_printk("read: %d, sockfd: %d, len: %d\n", fd,
+//                     send_data.sockfd, len);
 
     // Keep track of sockfd for noting read call
     u64 pid_tgid = bpf_get_current_pid_tgid();
+    bpf_trace_printk("read: pid_tgid: %d\n", pid_tgid);
     u64 sockfd = (u64)fd;
     pid_to_curr_fd.insert(&pid_tgid, &sockfd);
+
+    read_events.perf_submit(ctx, &send_data, sizeof(send_data));
     return 0;
 }
 
 int trace_read_return(struct pt_regs *ctx) {
-    u64 pid_tgid = bpf_get_current_pid_tgid();
-    u64 *fd = pid_to_curr_fd.lookup(&pid_tgid);
-    if (fd == 0) {
-        return 0; // missed entry (not a network read)
-    }
-
     struct send_data_t send_data = {};
     get_thread_metadata(&send_data);
     if (!apply_filter(&send_data)) {
         return 0;
     };
-    send_data.sockfd = *fd;
+
+    u64 pid_tgid = bpf_get_current_pid_tgid();
+
+    u64 *fd = pid_to_curr_fd.lookup(&pid_tgid);
+    if (fd == 0) {
+        return 0; // missed entry (not a network read)
+    }
+
+    bpf_trace_printk("read return: pid_tgid: %d, sockfd: %d\n", pid_tgid, *fd);
+
+//    send_data.sockfd = *fd;
     send_data.len = PT_REGS_RC(ctx);
+
     read_return_events.perf_submit(ctx, &send_data, sizeof(send_data));
     pid_to_curr_fd._delete(&pid_tgid);
     return 0;
@@ -710,6 +766,9 @@ int trace_readv_entry(struct pt_regs *ctx,
 int trace_readv_return(struct pt_regs *ctx) {
     u64 pid_tgid = bpf_get_current_pid_tgid();
     u64 *fd = pid_to_curr_fd.lookup(&pid_tgid);
+
+    bpf_trace_printk("readv return: pid_tgid: %d\n", pid_tgid);
+
     if (fd == 0) {
         return 0; // missed entry (not a network read)
     }
@@ -837,14 +896,14 @@ int trace_accept_return(struct pt_regs *ctx)
         return -1;
     }
 
-    set_network_fd(fd);
-
     struct send_data_t send_data = {};
     get_thread_metadata(&send_data);
     if (!apply_filter(&send_data)) {
         return 0;
     };
     send_data.sockfd = (u64)fd;
+
+    set_network_fd(send_data.sockfd);
 
     accept_return_events.perf_submit(ctx, &send_data, sizeof(send_data));
     return 0;
@@ -859,6 +918,8 @@ int trace_accept4_entry(struct pt_regs *ctx,
         return 0;
     };
     send_data.sockfd = (u64)sockfd;
+
+    set_network_fd(send_data.sockfd);
 
     accept4_events.perf_submit(ctx, &send_data, sizeof(send_data));
     return 0;

@@ -13,9 +13,13 @@
 from __future__ import print_function
 
 import re
+import sys
 
 import datetime
 from time import sleep
+
+import csv
+import signal
 from bcc import BPF
 from struct import pack
 
@@ -23,8 +27,8 @@ import argparse
 from socket import ntohs, inet_ntop, AF_INET
 import ctypes as ct
 
-RING_BUFFER_PAGE_CNT = 2 << 7
-DEFAULT_FILE_NAME = "stream_log_{}.csv".format(datetime.datetime.now().strftime("%m-%d_%H:%M:%S"))
+RING_BUFFER_PAGE_CNT = 2 << 8
+DEFAULT_FILE_NAME = "stream_log_{}".format(datetime.datetime.now().strftime("%m-%d_%H:%M:%S"))
 
 # arguments
 # from kafka_source import BpfProducer
@@ -46,7 +50,7 @@ parser.add_argument("-v", "--verbose", action="store_true",
                     help="Verbose mode")
 parser.add_argument("-o", "--output",
                     default=DEFAULT_FILE_NAME,
-                    help="Output to file")
+                    help="Output to file (exclude extension)")
 parser.add_argument("--trace", action="store_true",
                     help="Print trace readlines")
 parser.add_argument("-s", "--kafka-server",
@@ -70,7 +74,8 @@ parser.add_argument("-P", "--port",
                     help="comma-separated list of destination ports to trace.")
 args = parser.parse_args()
 
-output_file = open(args.output, "w+")
+csvfile = open(args.output + ".csv", 'wb')
+result_writer = csv.writer(csvfile, delimiter="\t", lineterminator="\n")
 
 with open("sys_stream.cc", "r") as f:
     bpf_text = f.read()
@@ -161,6 +166,7 @@ class Data_send(ct.Structure):
 # PRODUCER = BpfProducer(
 #     bootstrap_servers=[args.kafka_server], local_only=args.local_only)
 
+results = []
 
 def print_event(func_name, data, is_return=False):
     event = ct.cast(data, ct.POINTER(Data_send)).contents
@@ -168,12 +174,12 @@ def print_event(func_name, data, is_return=False):
     if args.timestamp:
         if start_ts == 0:
             start_ts = event.ts_us
-        curr_ts = (float(event.ts_us) - start_ts) / 1000000
-        print("%-9.5f" % (curr_ts), end="")
+        curr_ts = float(event.ts_us) - start_ts
+        print("%-9.5f" % (curr_ts / 1000000.0), end="")
               # file=args.output)
 
     data = {
-        "timestamp": curr_ts,
+        "timestamp_us": curr_ts,
         "func": func_name + ("_RETURN" if is_return else ""),
         "pid": event.pid,
         "task": event.task.decode(),
@@ -198,15 +204,18 @@ def print_event(func_name, data, is_return=False):
             saddr=(saddr + ":") if saddr else "", sport=sport or "",
             daddr=daddr, dport=dport)
         data["sourceAddress"] = saddr
-        data["sourceAddress"] = saddr
-        data["destAddress"] = sport
-        data["destPort"] = sport
+        data["sourcePort"] = sport
+        data["destAddress"] = daddr
+        data["destPort"] = dport
 
     if "send" in func_name or "write" in func_name:
         if func_name == "writev" and not is_return:
             notes = "Sending with iocnt={}".format(event.len)
         else:
-            notes = "Sending {} bytes".format(event.len)
+            if is_return:
+                notes = "{} bytes sent".format(event.len)
+            else:
+                notes = "Sending {} bytes".format(event.len)
         data["bytes"] = event.len
 
     if "read" in func_name or "recv" in func_name:
@@ -224,6 +233,7 @@ def print_event(func_name, data, is_return=False):
         notes = "family:{family}, flags:{flags:04x}".format(family=family, flags=event.flags)
 
     has_sockfd = "socket" != func_name or is_return
+    data["notes"] = notes
     # PRODUCER.send("tcpconnect-ipv4", event, 4)
     print("%-20s %-6d %-12.12s %-6s %-12.12s %-6s %s" % \
           (func_name + ("_RETURN" if is_return else ""),
@@ -234,15 +244,26 @@ def print_event(func_name, data, is_return=False):
           end="\n")
           # file=args.output)
 
-    import json
-    output_file.write(json.dumps(data, sort_keys=True, indent=4))
-    # json.dump(data, file)
+    results.append(data)
 
     if has_sockfd:
         data["sockfd"] = event.sockfd
 
+    cols = ["timestamp", "func", "pid", "task", "ppid", "ptask", "sockfd", "notes"]
+    result_writer.writerow([data[col] if col in data else "" for col in cols])
 
-print("Writing to ", output_file.name)
+
+def write_to_file(signum, frame):
+    csvfile.close()
+    with open(args.output + ".json", "w+") as f:
+        print("Writing to ", f.name)
+        import json
+        f.write(json.dumps(results, sort_keys=True, indent=4))
+    sys.exit(0)
+
+signal.signal(signal.SIGINT, write_to_file)
+signal.signal(signal.SIGTERM, write_to_file)
+
 
 # initialize BPF
 b = BPF(text=bpf_text)
@@ -272,9 +293,9 @@ syscalls = [
     ("sendmmsg", False),
     ("recvmsg", False),
     ("sendto", False),
-    ("recv", False),
+    ("recv", True),
     ("recvfrom", True),
-    ("write", False),
+    ("write", True),
     ("writev", True),
     ("read", True),
     ("readv", True),
@@ -317,7 +338,7 @@ while 1:
         print(b.trace_readline())
     else:
         b.kprobe_poll()
-            # sleep(2)
+        # sleep(2)
         # except KeyboardInterrupt:
         #     print("Pressed Ctrl+C")
         #     break
